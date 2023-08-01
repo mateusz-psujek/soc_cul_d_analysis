@@ -1,0 +1,410 @@
+---
+title: "scd_analysis"
+author: "mateusz psujek"
+date: "2023-07-30"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(pacman)
+
+pacman::p_load(tidyverse, rstanarm, brms, bayesplot, ggdist, ggthemes, patchwork, grid, ggsci, wesanderson)
+
+theme_set(theme_tidybayes())
+```
+# to_do list
+
+#### Defining the model
+Model: multilevel varying-intercepts Bayesian binomial regression #to_do what type of binomial
+
+Mathematical definition
+$$
+\begin{aligned}
+NonO_i &\sim Binomial(N_i, p_i) \\
+logit(p_i) &= \overline{\alpha} +\alpha_{\text{condition}[i]} + z_{\text{subject}[i]} \sigma_{subject} \\
+\overline{\alpha} &\sim Normal(0, 1.5) \\
+\alpha_{\text{condition}} &\sim Normal(0,0.5) \\
+z_j &\sim Normal(0, 1) \;\;\; , \text{for } j = 1, \dots, 16 \\
+\sigma_{subject} &\sim Expontential(1)
+\end{aligned}
+$$
+
+### Loading the preprocessed data 
+Pre-processing script can be found in the same directory in preprocessing.R file
+```{r}
+df_backgroud <- read_csv("background_data.csv") %>% 
+  mutate(
+    #reordering the conditions - useful later when plotting
+    condition = factor(condition, levels = c("group", "individual"))
+  )
+
+df_ratio_bias <- read_csv("ratio_bias_data.csv")
+df_invest_task <- read_csv("invest_task_data.csv")
+df_belief_bias <- read_csv("belief_bias_data.csv")
+```
+### Joining the background data with each of the individual performance files
+```{r}
+join_background <- function(df){
+    
+    df <- df %>% 
+      nest(.by = c(id, condition)) %>% 
+      full_join(df_backgroud, by = c("id", "condition")) %>% 
+      unnest(data)
+  }
+df_ratio_bias <- df_ratio_bias %>% join_background()
+df_belief_bias <- df_belief_bias %>% join_background()
+df_invest_task <- df_invest_task %>% join_background()
+```
+
+### Belief bias
+```{r}
+m_belief_bias_base <- 
+  brm(data = df_belief_bias, 
+      family = binomial,
+      bf(nonoptimal | trials(1) ~ a + b,
+         a ~ 1 + (1 | id),
+         b ~ 0 + condition,
+         nl = TRUE),
+      prior = c(prior(normal(0, 0.5), nlpar = b),
+                prior(normal(0, 1.5), class = b, coef = Intercept, nlpar = a),
+                prior(exponential(1), class = sd, group = id, nlpar = a)),
+      iter = 2000, warmup = 1000, chains = 4, cores = 4,
+      seed = 13,
+      file = "fits/m_belief_bias_base")
+```
+#### checking convergance
+```{r fig.width = 12}
+print(m_belief_bias_base)
+mcmc_trace(m_belief_bias_base)
+```
+
+### Investment task 
+
+```{r}
+m_invest_task_base <- 
+  brm(data = df_invest_task, 
+      family = binomial,
+      bf(nonoptimal | trials(1) ~ a + b,
+         a ~ 1 + (1 | id),
+         b ~ 0 + condition,
+         nl = TRUE),
+      prior = c(prior(normal(0, 0.5), nlpar = b),
+                prior(normal(0, 1.5), class = b, coef = Intercept, nlpar = a),
+                prior(exponential(1), class = sd, group = id, nlpar = a)),
+      iter = 2000, warmup = 1000, chains = 4, cores = 4,
+      seed = 13,
+      file = "fits/m_invest_task_base")
+
+
+```
+```{r fig.width=12}
+mcmc_trace(m_invest_task_base)
+print(m_invest_task_base)
+```
+### Ratio bias
+
+#### Some data wrangling
+##### working out the interaction between number of red marbles in large tray (high(9,8) or low(7,6,5)) and the frame
+```{r}
+df_ratio_bias %>% glimpse
+
+df_ratio_bias<- df_ratio_bias %>% 
+  rowwise() %>% 
+  mutate(
+    current_frame = if_else(current_frame == "win_frame", "WF", "LF"),
+    frame_magnitude = str_flatten(c(current_frame, "/", n_red_magnitude)) %>% as_factor,
+    .after = nonoptimal
+  ) %>% 
+  filter(!n_red_large == 10)
+
+df_ratio_bias %>% glimpse
+
+distinct(df_ratio_bias, frame_magnitude)
+```
+
+#### Fitting the model
+```{r}
+# m_ratio_bias_base <- 
+#   brm(data = df_ratio_bias, 
+#       family = binomial,
+#       bf(nonoptimal | trials(1) ~ a + b,
+#          a ~ 1 + (1 | id),
+#          b ~ 0 + condition + frame_magnitude,
+#          nl = TRUE),
+#       prior = c(prior(normal(0, 0.5), nlpar = b),
+#                 prior(normal(0, 1.5), class = b, coef = Intercept, nlpar = a),
+#                 prior(exponential(1), class = sd, group = id, nlpar = a)),
+#       iter = 2000, warmup = 1000, chains = 4, cores = 4,
+#       seed = 13,
+#       file = "fits/m_ratio_bias_base")
+
+m_ratio_bias_interaction <- 
+  brm(data = df_ratio_bias, 
+      family = binomial,
+      bf(nonoptimal | trials(1) ~ a + b,
+         a ~ 1 + (1 | id),
+         b ~ 0 + condition + frame_magnitude,
+         nl = TRUE),
+      prior = c(prior(normal(0, 0.5), nlpar = b),
+                prior(normal(0, 1.5), class = b, coef = Intercept, nlpar = a),
+                prior(exponential(1), class = sd, group = id, nlpar = a)),
+      iter = 2000, warmup = 1000, chains = 4, cores = 4,
+      seed = 13,
+      file = "fits/m_ratio_bias_interaction")
+```
+
+
+
+##### Convergance checks
+```{r fig.width = 12}
+mcmc_trace(m_ratio_bias_interaction)
+print(m_ratio_bias_interaction)
+```
+```{r}
+m_ratio_bias_interaction %>% 
+  mcmc_plot(variable = c("^b_", "^sd_"), regex = T) +
+  theme(axis.text.y = element_text(hjust = 0))
+```
+### Plotting
+
+##### the contrasts
+```{r}
+
+# replace here if you change models!
+models <- list(m_belief_bias_base, m_invest_task_base, m_ratio_bias_interaction)
+names(models) <- c("belief_bias", "invest_task", "ratio_bias")
+
+posts <- map(models, as_draws_df)
+
+
+plots_contrast <- map(
+  posts,
+  .f = function(post){
+      df_contrast <- post %>% 
+        mutate(
+        contrast = b_b_conditionindividual - b_b_conditiongroup,
+        contrast_p = inv_logit_scaled(b_b_conditionindividual) - inv_logit_scaled(b_b_conditiongroup)
+         ) %>% 
+      select(contains("contrast")) %>% 
+      pivot_longer(everything())
+    
+      
+      plot_logodds <- 
+        df_contrast %>% 
+        filter(name == "contrast") %>% 
+        ggplot(aes(x = value, y = '')) +
+        stat_halfeye(fill = "darkgrey", alpha = 0.7) +
+        geom_vline(xintercept = 0, linetype = 'dashed', color = 'darkred') +
+        labs(
+          y = NULL,
+          x = "Posterior log-odds"
+          )
+      
+      plot_prob <- 
+        df_contrast %>% 
+        filter(name == "contrast_p") %>% 
+        ggplot(aes(x = value, y = '')) +
+        stat_halfeye(fill = "darkgrey", alpha = 0.7) +
+        geom_vline(xintercept = 0, linetype = 'dashed', color = 'darkred') +
+        labs(
+          y = NULL,
+          x = "Posterior on probablity scale"
+          )
+      output <- list(plot_logodds, plot_prob)
+      names(output) <- c("logodds", "prob")
+      return(output)
+  }
+)
+
+print(plots_contrast)
+```
+#### plotting the posterior predictions
+```{r}
+new_data <- distinct(df_belief_bias, condition)
+
+belief_bias_average <- 
+  fitted(m_belief_bias_base,
+         newdata = new_data,
+         re_formula = NA,
+         probs = c(.1, .9)
+         ) %>% 
+  data.frame() %>% 
+  bind_cols(new_data) %>% 
+  mutate(type = "average")
+
+
+
+
+belief_bias_marginal <- 
+  fitted(m_belief_bias_base,
+         newdata = new_data,
+         allow_new_levels = T,
+         sample_new_levels = "gaussian",
+         probs = c(.1, .9)
+         ) %>% 
+  data.frame() %>% 
+  bind_cols(new_data) %>% 
+  mutate(type = "marginal")
+
+#average
+plot_belief_bias_average <- belief_bias_average %>% 
+  mutate(condition = factor(condition, levels = c("individual", "group"))) %>% 
+  ggplot(aes(x = Estimate, y = condition, group = 1)) +
+  geom_pointinterval(aes(xmin = Q10, xmax = Q90)) +
+  geom_line() +
+  coord_cartesian(xlim = 0:1) +
+  labs(
+    y = NULL,
+    x = "Probability of non-optimal response"
+    )
+plot_belief_bias_average
+
+#marginal
+plot_belief_bias_marginal <- belief_bias_marginal %>% 
+  mutate(condition = factor(condition, levels = c("individual", "group"))) %>% 
+  ggplot(aes(x = Estimate, y = condition, group = 1)) +
+  geom_pointinterval(aes(xmin = Q10, xmax = Q90)) +
+  geom_line() +
+  coord_cartesian(xlim = 0:1)+
+    labs(
+      y = NULL,
+      x = "Probability of non-optimal response"
+      )
+plot_belief_bias_marginal
+
+#both average and marginal wrapped next to each other
+bind_rows(belief_bias_average, belief_bias_marginal) %>% 
+  ggplot(aes(x = Estimate, y = condition, group = 1))+
+  geom_pointinterval(aes(xmin = Q10, xmax = Q90)) +
+  geom_line()+
+  coord_cartesian(xlim = 0:1) +
+  facet_grid(rows = vars(type))
+```
+
+
+```{r}
+new_data <- distinct(df_invest_task, condition)
+
+plot_invest_task_marginal <- 
+  fitted(m_invest_task_base,
+         newdata = new_data,
+         allow_new_levels = T,
+         sample_new_levels = "gaussian",
+         probs = c(.1, .9)
+         ) %>% 
+  data.frame() %>% 
+  bind_cols(new_data) %>% 
+  mutate(condition = factor(condition, levels = c("individual", "group"))) %>% 
+  ggplot(aes(x = Estimate, y = condition, group = 1)) +
+  geom_pointinterval(aes(xmin = Q10, xmax = Q90)) +
+  geom_line() +
+  coord_cartesian(xlim = 0:1)+
+    labs(
+      y = NULL,
+      x = "Probability of non-optimal response"
+      )
+plot_invest_task_marginal
+```
+#### ratio bias predictive plot
+```{r}
+new_data <- expand_grid(
+  distinct(df_ratio_bias, condition),
+  distinct(df_ratio_bias, frame_magnitude)
+)
+
+d <- fitted(
+  m_ratio_bias_interaction,
+  newdata = new_data,
+  allow_new_levels = T,
+  sample_new_levels = "gaussian",
+  probs = c(.1, .9) 
+  ) %>% 
+  data.frame() %>% 
+  bind_cols(new_data) %>% 
+  arrange(desc(Estimate)) %>% 
+  mutate(frame_magnitude = factor(frame_magnitude, unique(frame_magnitude)))
+
+plot_ratio_bias_marginal <- d %>% 
+  ggplot(aes(x = Estimate, y = frame_magnitude, group = condition, color = condition)) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(xmin = Q10, xmax = Q90), alpha = 0.8, width = 0.2) +
+  coord_cartesian(xlim = 0:1)+
+  labs(
+    y = NULL,
+    x = "Probability of non-optimal response"
+  ) +
+  scale_color_lancet()
+plot_ratio_bias_marginal
+  
+```
+
+
+
+
+
+### Making the final figure for the paper
+```{r fig.width=10}
+
+l1 <- wrap_elements(panel = textGrob('Belief bias', rot=90, vjust = 3))
+l2 <- wrap_elements(panel = textGrob('Ratio bias', rot=90, vjust = 3))
+l3 <- wrap_elements(panel = textGrob('Investment task', rot=90, vjust = 3))
+
+(l2 | plots_contrast[["ratio_bias"]][["logodds"]] + labs(x = NULL) | plot_ratio_bias_marginal + labs(x = NULL)) /
+(l1 | plots_contrast[["belief_bias"]][["logodds"]] + labs(x = NULL) | plot_belief_bias_marginal + labs(x = NULL)) /
+(l3 | plots_contrast[["invest_task"]][["logodds"]] | plot_invest_task_marginal)
+
+
+(l2 | plots_contrast[["ratio_bias"]][["logodds"]] + labs(x = NULL) )/
+(l1 | plots_contrast[["belief_bias"]][["logodds"]] + labs(x = NULL) ) /
+(l3 | plots_contrast[["invest_task"]][["logodds"]])
+
+blank_label_contrast <- wrap_elements(panel = textGrob('Posterior log-odds', vjust = -4))
+blank_label_marginal <- wrap_elements(panel = textGrob('Probability scale', vjust = -4))
+
+
+(plots_contrast[["ratio_bias"]][["logodds"]] + 
+    labs(
+      title = "Ratio bias",
+      x = NULL
+      ) | 
+ plots_contrast[["belief_bias"]][["logodds"]] + 
+    labs(
+      title = "Belief bias",
+      x = NULL
+      ) | 
+ plots_contrast[["invest_task"]][["logodds"]] + 
+    labs(
+      title = "Investment task",
+      x = NULL
+      ) 
+  ) / 
+  blank_label_contrast
+
+ggsave("plots/fig_contrast(ind-group).png")
+
+
+(plot_ratio_bias_marginal + 
+    labs(
+      title = "Ratio bias",
+      x = NULL
+      ) +
+    theme(legend.position = "top") | 
+ plot_belief_bias_marginal + 
+    labs(
+      title = "Belief bias",
+      x = NULL
+      ) | 
+ plot_invest_task_marginal + 
+    labs(
+      title = "Investment task",
+      x = NULL
+      ) 
+  ) / 
+  blank_label_marginal
+
+ggsave("plots/fig_marginal.png")
+
+```
+
